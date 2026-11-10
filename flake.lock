@@ -1,0 +1,58 @@
+{
+  "nodes": {
+    "copeanddrag": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791991327,
+        "narHash": "sha256-6nyhqoZmN5U1ia+zZxvA3zshbOC1mpMjuvW3X3a8v9U=",
+        "owner": "sidprasad",
+        "repo": "copeanddrag",
+        "rev": "1158ffc7d2faa10a045a4dd4794e93c8c5b49d6c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "sidprasad",
+        "repo": "copeanddrag",
+        "type": "github"
+      }
+    },
+    "forge": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794071494,
+        "narHash": "sha256-2VzKtvmiue5jNbZyyHvTKnyqmD29mI7uzW3ODxKXkAo=",
+        "owner": "tnelson",
+        "repo": "Forge",
+        "rev": "326400a735540d25f697336c7efbacd215b1800e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tnelson",
+        "repo": "Forge",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793977579,
+        "narHash": "sha256-4/Yzr1fWTh/zBAR1tR84ZQ1Zhmor8AXwgD4AS7sPn60=",
+        "rev": "4fe25e12eb9f4c744966dd3de5a05246cf098601",
+        "type": "tarball",
+        "url": "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1109744.4fe25e12eb9f/nixexprs.tar.zst"
+      },
+      "original": {
+        "id": "nixpkgs",
+        "type": "indirect"
+      }
+    },
+    "root": {
+      "inputs": {
+        "copeanddrag": "copeanddrag",
+        "forge": "forge",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
