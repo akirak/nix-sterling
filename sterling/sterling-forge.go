@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -230,9 +229,8 @@ func run(argv []string) (int, error) {
 		return 0, err
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
+	sigCh, stopSignals := notifyShutdownSignals()
+	defer stopSignals()
 	go func() {
 		sig := <-sigCh
 		child.stop()
@@ -606,10 +604,9 @@ func browserCommand(configured string) (string, []string) {
 }
 
 func waitForSignal() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	sigCh, stopSignals := notifyShutdownSignals()
+	defer stopSignals()
 	<-sigCh
-	signal.Stop(sigCh)
 }
 
 func defaultStaticDir() string {
