@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,12 +21,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 var (
 	appName    = envOr("STERLING_APP_NAME", "sterling-forge")
+	flavor     = envOr("STERLING_FLAVOR", defaultFlavor(appName))
 	allowModel = os.Getenv("STERLING_ALLOW_MODEL") != "0"
 )
 
@@ -46,6 +49,7 @@ type options struct {
 	timeout      time.Duration
 	staticDir    string
 	racket       string
+	alloy        string
 	readyFile    string
 	model        string
 	browser      string
@@ -109,6 +113,7 @@ func run(argv []string) (int, error) {
 	fs.IntVar(&timeout, "timeout", timeout, "")
 	fs.StringVar(&opts.staticDir, "static-dir", defaultStaticDir(), "")
 	fs.StringVar(&opts.racket, "racket", envOr("STERLING_RACKET", "racket"), "")
+	fs.StringVar(&opts.alloy, "alloy", envOr("STERLING_ALLOY", "alloy6"), "")
 	fs.StringVar(&opts.readyFile, "ready-file", os.Getenv("STERLING_READY_FILE"), "")
 	fs.StringVar(&opts.model, "model", envModel(), "")
 	fs.StringVar(&opts.browser, "browser", os.Getenv("STERLING_BROWSER"), "")
@@ -163,14 +168,17 @@ func run(argv []string) (int, error) {
 	}
 
 	opts.serveOnly = opts.serveOnly || !allowModel
+	if flavor == "alloy" && opts.model == "" {
+		// The Alloy launcher historically served the UI alone, allowing an
+		// externally started provider to connect. Keep that behavior when no
+		// model is given.
+		opts.serveOnly = true
+	}
 	if opts.serveOnly && opts.model != "" {
-		if allowModel {
-			return 0, usagef("--serve-only cannot be combined with a model")
-		}
-		return 0, usagef("%s serves the UI only and does not accept a model", appName)
+		return 0, usagef("--serve-only cannot be combined with a model")
 	}
 	if !opts.serveOnly && opts.model == "" {
-		return 0, usagef("missing MODEL.frg (or use --serve-only)")
+		return 0, usagef("missing %s (or use --serve-only)", modelFileForFlavor())
 	}
 	opts.extraArgs = extraArgs
 
@@ -182,7 +190,12 @@ func run(argv []string) (int, error) {
 		return 0, fmt.Errorf("no index.html in static directory %s; build the project or pass --static-dir", staticDir)
 	}
 
-	server := &http.Server{Handler: staticHandler(staticDir, opts.verbose)}
+	var alloyWS *atomic.Int64
+	if flavor == "alloy" {
+		alloyWS = new(atomic.Int64)
+	}
+
+	server := &http.Server{Handler: staticHandler(staticDir, opts.verbose, alloyWS)}
 	listener, err := net.Listen("tcp", net.JoinHostPort(opts.host, strconv.Itoa(opts.staticPort)))
 	if err != nil {
 		return 0, fmt.Errorf("could not listen on %s:%d: %w", opts.host, opts.staticPort, err)
@@ -190,6 +203,10 @@ func run(argv []string) (int, error) {
 	staticPort = listener.Addr().(*net.TCPAddr).Port
 	defer server.Close()
 	go func() { _ = server.Serve(listener) }()
+
+	if flavor == "alloy" {
+		return runAlloy(opts, staticPort, staticDir, alloyWS)
+	}
 
 	if opts.serveOnly {
 		if err := emitReady(opts, staticPort, nil, staticDir); err != nil {
@@ -395,7 +412,7 @@ func freePort(host string) (int, error) {
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
-func staticHandler(root string, verbose bool) http.Handler {
+func staticHandler(root string, verbose bool, alloyWS *atomic.Int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -446,6 +463,25 @@ func staticHandler(root string, verbose bool) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if contentType := mime.TypeByExtension(filepath.Ext(filePath)); contentType != "" {
 			w.Header().Set("Content-Type", contentType)
+		}
+
+		if alloyWS != nil && strings.HasSuffix(filePath, ".js") {
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			if port := alloyWS.Load(); port > 0 {
+				data = bytes.ReplaceAll(data,
+					[]byte("ws://localhost:4000/alloy"),
+					[]byte(fmt.Sprintf("ws://localhost:%d/alloy", port)))
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			if r.Method == http.MethodHead {
+				return
+			}
+			_, _ = w.Write(data)
+			return
 		}
 
 		file, err := os.Open(filePath)
@@ -663,24 +699,35 @@ func helpText() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: %s [options]", appName)
 	if allowModel {
-		b.WriteString(" MODEL.frg [TAG]")
+		fmt.Fprintf(&b, " %s [TAG]", modelFileForFlavor())
 	}
-	b.WriteString(" [-- RACKET_ARGS...]\n\n")
+	fmt.Fprintf(&b, " [-- %s...]\n\n", extraArgsNameForFlavor())
 
+	b.WriteString("Serve the locally-built Cope and Drag (Sterling) UI.\n")
 	if allowModel {
-		b.WriteString("Serve the locally-built Cope and Drag (Sterling) UI. When a MODEL is\n")
-		b.WriteString("supplied, start Forge in Sterling provider mode and print the visualizer URL.\n")
-	} else {
-		b.WriteString("Serve the locally-built Cope and Drag (Sterling) UI.\n")
+		if flavor == "alloy" {
+			b.WriteString("When a MODEL is supplied, start an Alloy Sterling provider and print the\n")
+			b.WriteString("visualizer URL. Without a model, serve the UI for an external provider.\n")
+		} else {
+			b.WriteString("When a MODEL is supplied, start Forge in Sterling provider mode and print\n")
+			b.WriteString("the visualizer URL.\n")
+		}
 	}
 	b.WriteString("The URL is printed to stdout; diagnostics go to stderr.\n\n")
 
 	b.WriteString("Options:\n")
 	if allowModel {
-		b.WriteString("  -p, --provider-port PORT   Port for Forge's Sterling provider (default: random)\n")
-		b.WriteString("      --timeout SECONDS      How long to wait for Forge (default: 120)\n")
-		b.WriteString("      --racket PATH          Racket executable to use (default: racket)\n")
-		b.WriteString("      --serve-only           Serve the UI without starting Forge\n")
+		if flavor == "alloy" {
+			b.WriteString("  -p, --provider-port PORT   Port for Alloy's Sterling provider (default: random)\n")
+			b.WriteString("      --timeout SECONDS      How long to wait for Alloy commands (default: 120)\n")
+			b.WriteString("      --alloy PATH           Alloy executable to use (default: alloy6)\n")
+			b.WriteString("      --serve-only           Serve the UI without starting Alloy\n")
+		} else {
+			b.WriteString("  -p, --provider-port PORT   Port for Forge's Sterling provider (default: random)\n")
+			b.WriteString("      --timeout SECONDS      How long to wait for Forge (default: 120)\n")
+			b.WriteString("      --racket PATH          Racket executable to use (default: racket)\n")
+			b.WriteString("      --serve-only           Serve the UI without starting Forge\n")
+		}
 		b.WriteString("      --model FILE           Model to run (alternative to a positional argument)\n")
 	}
 	b.WriteString("      --static-port PORT     Port for the static file server (default: random)\n")
@@ -701,7 +748,11 @@ func helpText() string {
 		b.WriteString("  STERLING_MODEL             Model to run when no positional argument is given\n")
 		b.WriteString("  STERLING_PROVIDER_PORT     Same as --provider-port\n")
 		b.WriteString("  STERLING_TIMEOUT           Same as --timeout\n")
-		b.WriteString("  STERLING_RACKET            Same as --racket\n")
+		if flavor == "alloy" {
+			b.WriteString("  STERLING_ALLOY             Same as --alloy\n")
+		} else {
+			b.WriteString("  STERLING_RACKET            Same as --racket\n")
+		}
 	}
 	b.WriteString("  STERLING_STATIC_PORT       Same as --static-port\n")
 	b.WriteString("  STERLING_HOST              Same as --host\n")
@@ -709,4 +760,25 @@ func helpText() string {
 	b.WriteString("  STERLING_BROWSER           Same as --browser\n")
 	b.WriteString("  STERLING_APP_NAME          Name used in help and diagnostics\n")
 	return b.String()
+}
+
+func defaultFlavor(name string) string {
+	if strings.Contains(strings.ToLower(name), "alloy") {
+		return "alloy"
+	}
+	return "forge"
+}
+
+func modelFileForFlavor() string {
+	if flavor == "alloy" {
+		return "MODEL.als"
+	}
+	return "MODEL.frg"
+}
+
+func extraArgsNameForFlavor() string {
+	if flavor == "alloy" {
+		return "ALLOY_ARGS"
+	}
+	return "RACKET_ARGS"
 }

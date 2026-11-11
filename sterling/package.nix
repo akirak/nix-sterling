@@ -6,6 +6,9 @@
   web,
   description,
   extraArgs ? "",
+  alloy ? null,
+  alloyProgram ? "alloy6",
+  flavor ? null,
 }:
 symlinkJoin {
   name = "${name}-${version}";
@@ -17,6 +20,9 @@ symlinkJoin {
         version
         extraArgs
         web
+        alloy
+        alloyProgram
+        flavor
         ;
     })
   ];

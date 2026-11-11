@@ -63,6 +63,9 @@
               web,
               description,
               extraArgs ? "",
+              alloy ? null,
+              alloyProgram ? "alloy6",
+              flavor ? null,
             }:
             pkgs.callPackage ./sterling/package.nix {
               inherit
@@ -70,6 +73,9 @@
                 web
                 description
                 extraArgs
+                alloy
+                alloyProgram
+                flavor
                 version
                 ;
             };
@@ -88,8 +94,8 @@
           sterling-alloy = mkPackage {
             name = "sterling-alloy";
             web = copeanddrag-alloy;
-            description = "CLI for serving the locally-built Cope and Drag UI for Alloy";
-            extraArgs = "--set-default STERLING_ALLOW_MODEL 0";
+            description = "CLI for running Alloy models with the locally-built Cope and Drag UI";
+            alloy = pkgs.alloy6;
           };
         }
       );

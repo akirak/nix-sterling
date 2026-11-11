@@ -7,7 +7,19 @@
   web,
   version,
   extraArgs ? "",
+  alloy ? null,
+  alloyProgram ? "alloy6",
+  flavor ? null,
 }:
+let
+  actualFlavor =
+    if flavor != null then
+      flavor
+    else if lib.hasInfix "alloy" name then
+      "alloy"
+    else
+      "forge";
+in
 stdenv.mkDerivation {
   pname = "${name}-launcher";
   inherit version;
@@ -39,7 +51,9 @@ stdenv.mkDerivation {
       --set-default STERLING_DIST "${web}/share/${name}" \
       --set-default STERLING_VERSION "${version}" \
       --set-default STERLING_APP_NAME "${name}" \
-      --set-default STERLING_RACKET "${web}/bin/racket" ${extraArgs}
+      --set-default STERLING_FLAVOR "${actualFlavor}" \
+      --set-default STERLING_RACKET "${web}/bin/racket" \
+      ${lib.optionalString (alloy != null) "--set-default STERLING_ALLOY '${alloy}/bin/${alloyProgram}'"} ${extraArgs}
 
     runHook postInstall
   '';
