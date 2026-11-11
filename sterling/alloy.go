@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,12 +27,14 @@ type alloyCommand struct {
 }
 
 type alloyProvider struct {
-	opts    options
-	model   string
-	alloy   string
-	host    string
-	port    int
-	timeout time.Duration
+	opts         options
+	model        string
+	commandModel string
+	cleanup      func()
+	alloy        string
+	host         string
+	port         int
+	timeout      time.Duration
 
 	mu       sync.Mutex
 	commands []alloyCommand
@@ -84,20 +90,37 @@ func startAlloyProvider(opts options, model string) (*alloyProvider, error) {
 		return nil, fmt.Errorf("could not find Alloy executable %q: %w", opts.alloy, err)
 	}
 
+	// Alloy always opens util/integer implicitly and resolves it relative to
+	// the model's module path. If a different file named integer.als happens to
+	// live there (as in the alloytools/models repository), Alloy recursively
+	// imports that file until it reports a circular dependency. Run a staged
+	// copy of the model with the built-in integer module left to Alloy's jar.
+	commandModel, cleanup, err := stageAlloyModel(model)
+	if err != nil {
+		logf(opts, "could not stage Alloy model; running it in place: %v", err)
+		commandModel = model
+		cleanup = nil
+	}
+
 	listener, err := net.Listen("tcp", net.JoinHostPort(opts.host, strconv.Itoa(opts.providerPort)))
 	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
 		return nil, fmt.Errorf("could not listen for Alloy provider on %s:%d: %w", opts.host, opts.providerPort, err)
 	}
 
 	p := &alloyProvider{
-		opts:    opts,
-		model:   model,
-		alloy:   opts.alloy,
-		host:    opts.host,
-		port:    listener.Addr().(*net.TCPAddr).Port,
-		timeout: opts.timeout,
-		clients: make(map[*wsConn]struct{}),
-		cache:   make(map[int]string),
+		opts:         opts,
+		model:        model,
+		commandModel: commandModel,
+		cleanup:      cleanup,
+		alloy:        opts.alloy,
+		host:         opts.host,
+		port:         listener.Addr().(*net.TCPAddr).Port,
+		timeout:      opts.timeout,
+		clients:      make(map[*wsConn]struct{}),
+		cache:        make(map[int]string),
 	}
 	p.commands = p.loadCommands()
 
@@ -126,6 +149,130 @@ func (p *alloyProvider) close() {
 
 	for _, client := range clients {
 		client.close()
+	}
+
+	if p.cleanup != nil {
+		p.cleanup()
+		p.cleanup = nil
+	}
+}
+
+var alloyModulePattern = regexp.MustCompile(`(?m)^[ \t]*module[ \t]+([^ \t\r\n\[\]]+)`)
+
+// stageAlloyModel copies a model and its local modules into a temporary tree
+// whose layout follows the model's module declaration. Alloy resolves imports
+// from the module name rather than the physical directory, so this also avoids
+// accidentally resolving its implicit "open util/integer" to an unrelated
+// integer.als file next to the original model.
+func stageAlloyModel(model string) (string, func(), error) {
+	content, err := os.ReadFile(model)
+	if err != nil {
+		return "", nil, err
+	}
+
+	tempDir, err := os.MkdirTemp("", "sterling-alloy-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tempDir) }
+
+	staged, err := stagedAlloyPath(tempDir, model, string(content))
+	if err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	stageDir := filepath.Dir(staged)
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := copyAlloyTree(filepath.Dir(model), stageDir); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(staged), 0o755); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := os.WriteFile(staged, content, 0o644); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return staged, cleanup, nil
+}
+
+func stagedAlloyPath(tempDir, model, content string) (string, error) {
+	ext := ".als"
+	if strings.EqualFold(filepath.Ext(model), ".md") {
+		ext = ".md"
+	}
+
+	match := alloyModulePattern.FindStringSubmatch(content)
+	if len(match) == 2 {
+		module := path.Clean(strings.ReplaceAll(match[1], "\\", "/"))
+		if module != "." && module != ".." && !strings.HasPrefix(module, "../") && !strings.HasPrefix(module, "/") {
+			return filepath.Join(tempDir, filepath.FromSlash(module+ext)), nil
+		}
+	}
+
+	base := filepath.Base(model)
+	if strings.EqualFold(base, "integer.als") {
+		// Alloy skips its implicit integer import for a file whose path ends
+		// with util/integer.als, which is exactly what this file defines.
+		return filepath.Join(tempDir, "util", "integer.als"), nil
+	}
+	return filepath.Join(tempDir, base), nil
+}
+
+func copyAlloyTree(srcDir, dstDir string) error {
+	return filepath.WalkDir(srcDir, func(src string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if src == srcDir {
+			return nil
+		}
+
+		rel, err := filepath.Rel(srcDir, src)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+
+		// Alloy only loads .als files and Markdown (.md) models. Skip the
+		// implicit integer module so that Alloy falls back to the copy bundled
+		// in its own jar instead of recursively importing this one.
+		if entry.Name() == "integer.als" || entry.Name() == "integer.md" || !isAlloySource(entry.Name()) {
+			return nil
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o644)
+	})
+}
+
+func isAlloySource(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".als", ".md":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -240,6 +387,16 @@ func (p *alloyProvider) sendData(conn *wsConn, index int) {
 		})
 		return
 	}
+	if xml == "" {
+		// The command is unsatisfiable (for example, "run ... expect 0").
+		// Alloy exits successfully without producing an instance.
+		p.sendJSON(conn, map[string]any{
+			"type":    "data",
+			"version": 1,
+			"payload": map[string]any{"enter": []any{}},
+		})
+		return
+	}
 
 	p.mu.Lock()
 	p.nextID++
@@ -304,7 +461,7 @@ func (p *alloyProvider) loadCommands() []alloyCommand {
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, p.alloy, "commands", p.model)
+	cmd := exec.CommandContext(ctx, p.alloy, "commands", p.commandModel)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -369,7 +526,7 @@ func (p *alloyProvider) runCommand(index int) (string, error) {
 		"-o", "-",
 	}
 	args = append(args, p.opts.extraArgs...)
-	args = append(args, p.model)
+	args = append(args, p.commandModel)
 
 	cmd := exec.CommandContext(ctx, p.alloy, args...)
 	var stderr bytes.Buffer
@@ -384,7 +541,8 @@ func (p *alloyProvider) runCommand(index int) (string, error) {
 
 	xml := extractAlloyXML(string(out))
 	if xml == "" {
-		return "", fmt.Errorf("Alloy produced no instance%s", formatStderr(stderr.String()))
+		// An unsatisfiable command exits successfully without writing XML.
+		return "", nil
 	}
 	return setAlloyFilename(xml, p.model), nil
 }
