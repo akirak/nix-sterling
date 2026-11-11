@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Keep flake inputs (and the nested flake.lock) up to date.
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  # Launcher sources live in their own Go module.
+  - package-ecosystem: "gomod"
+    directory: "/sterling"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  # Keep any future workflow actions pinned to current versions.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
