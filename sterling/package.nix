@@ -7,7 +7,6 @@
   description,
   extraArgs ? "",
   alloy ? null,
-  alloyProgram ? "alloy6",
   flavor ? null,
 }:
 symlinkJoin {
@@ -21,7 +20,6 @@ symlinkJoin {
         extraArgs
         web
         alloy
-        alloyProgram
         flavor
         ;
     })

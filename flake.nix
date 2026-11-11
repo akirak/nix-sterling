@@ -64,17 +64,15 @@
               description,
               extraArgs ? "",
               alloy ? null,
-              alloyProgram ? "alloy6",
               flavor ? null,
             }:
             pkgs.callPackage ./sterling/package.nix {
+              alloy = pkgs.alloy6;
               inherit
                 name
                 web
                 description
                 extraArgs
-                alloy
-                alloyProgram
                 flavor
                 version
                 ;

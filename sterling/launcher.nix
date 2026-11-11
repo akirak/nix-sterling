@@ -8,7 +8,6 @@
   version,
   extraArgs ? "",
   alloy ? null,
-  alloyProgram ? "alloy6",
   flavor ? null,
 }:
 let
@@ -53,7 +52,9 @@ stdenv.mkDerivation {
       --set-default STERLING_APP_NAME "${name}" \
       --set-default STERLING_FLAVOR "${actualFlavor}" \
       --set-default STERLING_RACKET "${web}/bin/racket" \
-      ${lib.optionalString (alloy != null) "--set-default STERLING_ALLOY '${alloy}/bin/${alloyProgram}'"} ${extraArgs}
+      ${
+        lib.optionalString (alloy != null) "--set-default STERLING_ALLOY '${lib.getExe alloy}'"
+      } ${extraArgs}
 
     runHook postInstall
   '';
