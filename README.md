@@ -26,7 +26,7 @@ All components are built from source in a hermetic Nix sandbox without runtime n
 nix run .#sterling-forge -- path/to/model.frg
 ```
 
-`sterling-forge` starts a local HTTP server for the web UI, launches Forge in Sterling provider mode on a free port, and prints the visualizer URL (e.g. `http://127.0.0.1:<static-port>/?<provider-port>`) to `stdout`.
+`sterling-forge` starts a local HTTP server for the web UI, launches Forge in Sterling provider mode on a free port, and prints the visualizer URL (e.g. `http://127.0.0.1:<static-port>/?<provider-port>`) to `stdout`. It also opens the URL in the system browser; pass `--no-browser` to suppress this, or use `--browser PROGRAM` (or `STERLING_BROWSER`) to choose a specific browser.
 
 Additional arguments after `--` are forwarded directly to the underlying `racket` invocation:
 
@@ -38,6 +38,12 @@ To serve only the Forge UI without starting a Forge process:
 
 ```sh
 nix run .#sterling-forge -- --serve-only
+```
+
+To serve the UI without opening a browser:
+
+```sh
+nix run .#sterling-forge -- --serve-only --no-browser
 ```
 
 ## Launcher CLI Reference

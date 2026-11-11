@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,8 @@ type options struct {
 	racket       string
 	readyFile    string
 	model        string
+	browser      string
+	noBrowser    bool
 	json         bool
 	quiet        bool
 	verbose      bool
@@ -108,6 +111,8 @@ func run(argv []string) (int, error) {
 	fs.StringVar(&opts.racket, "racket", envOr("STERLING_RACKET", "racket"), "")
 	fs.StringVar(&opts.readyFile, "ready-file", os.Getenv("STERLING_READY_FILE"), "")
 	fs.StringVar(&opts.model, "model", envModel(), "")
+	fs.StringVar(&opts.browser, "browser", os.Getenv("STERLING_BROWSER"), "")
+	fs.BoolVar(&opts.noBrowser, "no-browser", false, "")
 	fs.BoolVar(&opts.json, "json", false, "")
 	fs.BoolVar(&opts.quiet, "quiet", false, "")
 	fs.BoolVar(&opts.quiet, "q", false, "")
@@ -190,6 +195,7 @@ func run(argv []string) (int, error) {
 		if err := emitReady(opts, staticPort, nil, staticDir); err != nil {
 			return 0, err
 		}
+		openBrowser(opts, visualizerURL(opts, staticPort, nil))
 		waitForSignal()
 		return 0, nil
 	}
@@ -229,6 +235,7 @@ func run(argv []string) (int, error) {
 		child.stop()
 		return 0, err
 	}
+	openBrowser(opts, visualizerURL(opts, staticPort, &providerPort))
 
 	waitErr := child.wait()
 	if waitErr != nil {
@@ -451,11 +458,16 @@ func staticHandler(root string, verbose bool) http.Handler {
 	})
 }
 
-func emitReady(opts options, staticPort int, providerPort *int, staticDir string) error {
+func visualizerURL(opts options, staticPort int, providerPort *int) string {
 	url := fmt.Sprintf("http://%s:%d/", opts.host, staticPort)
 	if providerPort != nil {
 		url += fmt.Sprintf("?%d", *providerPort)
 	}
+	return url
+}
+
+func emitReady(opts options, staticPort int, providerPort *int, staticDir string) error {
+	url := visualizerURL(opts, staticPort, providerPort)
 
 	payload := url
 	if opts.json {
@@ -501,6 +513,60 @@ func emitReady(opts options, staticPort int, providerPort *int, staticDir string
 		return err
 	}
 	return os.WriteFile(opts.readyFile, []byte(url+"\n"), 0o666)
+}
+
+// openBrowser starts the requested browser (or the platform default) without
+// waiting for it. Browsers are a convenience, so failures are reported as
+// warnings rather than terminating the server.
+func openBrowser(opts options, url string) {
+	if opts.noBrowser {
+		return
+	}
+
+	program, args := browserCommand(opts.browser)
+	if program == "" {
+		logf(opts, "could not determine a browser; open %s manually", url)
+		return
+	}
+	args = append(args, url)
+
+	cmd := exec.Command(program, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		logf(opts, "could not start browser %s: %v; open %s manually", program, err, url)
+		return
+	}
+	// Reap the process in the background: a browser launcher such as xdg-open
+	// may outlive us briefly, and we do not want its exit status to matter.
+	go func() { _ = cmd.Wait() }()
+}
+
+func browserCommand(configured string) (string, []string) {
+	if configured != "" {
+		return configured, nil
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		return "open", nil
+	case "windows":
+		return "rundll32", []string{"url.dll,FileProtocolHandler"}
+	}
+
+	candidates := [][]string{
+		{"xdg-open"},
+		{"handlr", "open"},
+		{"gio", "open"},
+		{"sensible-browser"},
+		{"x-www-browser"},
+	}
+	for _, candidate := range candidates {
+		if _, err := exec.LookPath(candidate[0]); err == nil {
+			return candidate[0], candidate[1:]
+		}
+	}
+	return "", nil
 }
 
 func waitForSignal() {
@@ -621,6 +687,8 @@ func helpText() string {
 	b.WriteString("      --host HOST            Address to bind (default: 127.0.0.1)\n")
 	b.WriteString("      --static-dir DIR       Directory to serve (default: built-in dist)\n")
 	b.WriteString("      --ready-file FILE      Write the visualizer URL to FILE when ready\n")
+	b.WriteString("      --browser PROGRAM      Browser executable to open the UI with (default: system browser)\n")
+	b.WriteString("      --no-browser           Do not open the UI in a browser\n")
 	b.WriteString("      --json                 Print one JSON object on stdout instead of the URL\n")
 	b.WriteString("  -q, --quiet                Suppress informational messages on stderr\n")
 	b.WriteString("  -v, --verbose              Log HTTP requests\n")
@@ -638,6 +706,7 @@ func helpText() string {
 	b.WriteString("  STERLING_STATIC_PORT       Same as --static-port\n")
 	b.WriteString("  STERLING_HOST              Same as --host\n")
 	b.WriteString("  STERLING_READY_FILE        Same as --ready-file\n")
+	b.WriteString("  STERLING_BROWSER           Same as --browser\n")
 	b.WriteString("  STERLING_APP_NAME          Name used in help and diagnostics\n")
 	return b.String()
 }
