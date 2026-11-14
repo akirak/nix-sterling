@@ -1,49 +1,31 @@
 package main
 
 import (
-	"os"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
-const (
-	watchPollInterval = 300 * time.Millisecond
-	watchSettleDelay  = 200 * time.Millisecond
-	watchSettleLimit  = 2 * time.Second
-)
+const watchDebounce = 200 * time.Millisecond
 
-// fileSnapshot is the subset of file metadata used to notice edits. Editors
-// commonly replace a file atomically, so both the modification time and size
-// are tracked.
-type fileSnapshot struct {
-	exists  bool
-	modTime time.Time
-	size    int64
-}
-
-func snapshotFile(path string) (fileSnapshot, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fileSnapshot{}, nil
-		}
-		return fileSnapshot{}, err
-	}
-	return fileSnapshot{
-		exists:  true,
-		modTime: info.ModTime(),
-		size:    info.Size(),
-	}, nil
-}
-
-// watchFile reports writes to path on the returned channel. It polls instead of
-// relying on a platform-specific notification API so the launcher remains a
-// dependency-free static binary. A change is reported only after the file has
-// stopped changing, which avoids validating (and restarting on) a partially
-// written file.
+// watchFile reports writes to path on the returned channel. It watches the
+// containing directory rather than the file itself so that editors that save
+// by renaming a temporary file over the model continue to be noticed.
 func watchFile(path string) (<-chan struct{}, func(), error) {
-	initial, err := snapshotFile(path)
+	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
+		return nil, nil, err
+	}
+
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		_ = watcher.Close()
+		return nil, nil, err
+	}
+	if err := watcher.Add(filepath.Dir(absolute)); err != nil {
+		_ = watcher.Close()
 		return nil, nil, err
 	}
 
@@ -53,52 +35,55 @@ func watchFile(path string) (<-chan struct{}, func(), error) {
 	stop := func() { stopOnce.Do(func() { close(done) }) }
 
 	go func() {
-		ticker := time.NewTicker(watchPollInterval)
-		defer ticker.Stop()
+		defer watcher.Close()
 
-		last := initial
+		var timer *time.Timer
+		var timerC <-chan time.Time
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
+
 		for {
 			select {
 			case <-done:
 				return
-			case <-ticker.C:
-			}
-
-			current, err := snapshotFile(path)
-			if err != nil || current == last {
-				continue
-			}
-
-			// Wait until the writer has finished before considering the file
-			// changed. The limit keeps a continuously-written file (or a
-			// process that never closes it) from blocking reloads forever.
-			deadline := time.Now().Add(watchSettleLimit)
-			for time.Now().Before(deadline) {
-				select {
-				case <-done:
+			case event, ok := <-watcher.Events:
+				if !ok {
 					return
-				case <-time.After(watchSettleDelay):
+				}
+				if filepath.Clean(event.Name) != absolute {
+					continue
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove|fsnotify.Chmod) == 0 {
+					continue
 				}
 
-				next, err := snapshotFile(path)
-				if err != nil {
-					break
+				// Coalesce the burst of events produced by a single save.
+				if timer == nil {
+					timer = time.NewTimer(watchDebounce)
+				} else {
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(watchDebounce)
 				}
-				if next == current {
-					break
+				timerC = timer.C
+			case <-timerC:
+				timerC = nil
+				select {
+				case changes <- struct{}{}:
+				default:
+					// A reload is already pending; coalesce further changes.
 				}
-				current = next
-			}
-
-			if current == last {
-				continue
-			}
-			last = current
-
-			select {
-			case changes <- struct{}{}:
-			default:
-				// A reload is already pending; coalesce further changes.
+			case _, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
 			}
 		}
 	}()

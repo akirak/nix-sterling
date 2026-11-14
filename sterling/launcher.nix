@@ -1,7 +1,6 @@
 {
   lib,
-  stdenv,
-  go,
+  buildGoModule,
   makeWrapper,
   name,
   web,
@@ -19,17 +18,15 @@ let
     else
       "forge";
 in
-stdenv.mkDerivation {
+buildGoModule {
   pname = "${name}-launcher";
   inherit version;
   src = ./.;
+  vendorHash = "sha256-qWQM+DlW/9/JlAv9M7QBUch3wSeOQFVgGxmkIm29yAM=";
 
   nativeBuildInputs = [
-    go
     makeWrapper
   ];
-
-  dontConfigure = true;
 
   buildPhase = ''
     runHook preBuild

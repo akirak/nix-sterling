@@ -22,11 +22,9 @@ func TestWatchFileReportsChanges(t *testing.T) {
 	select {
 	case <-changes:
 		t.Fatal("watchFile reported a change before the file was modified")
-	case <-time.After(2 * watchPollInterval):
+	case <-time.After(2 * watchDebounce):
 	}
 
-	// Give the filesystem a distinct modification time and size.
-	time.Sleep(10 * time.Millisecond)
 	if err := os.WriteFile(path, []byte("#lang forge\nsig A {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +33,34 @@ func TestWatchFileReportsChanges(t *testing.T) {
 	case <-changes:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the file change")
+	}
+}
+
+func TestWatchFileReportsAtomicReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model.frg")
+	if err := os.WriteFile(path, []byte("#lang forge\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changes, stop, err := watchFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	replacement := filepath.Join(dir, "model.frg.tmp")
+	if err := os.WriteFile(replacement, []byte("#lang forge\nsig A {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-changes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the replacement")
 	}
 }
 
@@ -53,6 +79,6 @@ func TestWatchFileIgnoresUnchangedFile(t *testing.T) {
 	select {
 	case <-changes:
 		t.Fatal("watchFile reported a change without a write")
-	case <-time.After(3 * watchPollInterval):
+	case <-time.After(3 * watchDebounce):
 	}
 }
