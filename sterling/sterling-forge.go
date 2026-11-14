@@ -53,6 +53,7 @@ type options struct {
 	model        string
 	browser      string
 	noBrowser    bool
+	watch        bool
 	json         bool
 	quiet        bool
 	verbose      bool
@@ -117,6 +118,7 @@ func run(argv []string) (int, error) {
 	fs.StringVar(&opts.model, "model", envModel(), "")
 	fs.StringVar(&opts.browser, "browser", os.Getenv("STERLING_BROWSER"), "")
 	fs.BoolVar(&opts.noBrowser, "no-browser", false, "")
+	fs.BoolVar(&opts.watch, "watch", envBool("STERLING_WATCH"), "")
 	fs.BoolVar(&opts.json, "json", false, "")
 	fs.BoolVar(&opts.quiet, "quiet", false, "")
 	fs.BoolVar(&opts.quiet, "q", false, "")
@@ -179,6 +181,9 @@ func run(argv []string) (int, error) {
 	if !opts.serveOnly && opts.model == "" {
 		return 0, usagef("missing %s (or use --serve-only)", modelFileForFlavor())
 	}
+	if opts.watch && opts.serveOnly {
+		return 0, usagef("--watch requires a model")
+	}
 	opts.extraArgs = extraArgs
 
 	staticDir, err := filepath.Abs(opts.staticDir)
@@ -228,12 +233,16 @@ func run(argv []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	var current atomic.Pointer[forgeProcess]
+	current.Store(child)
 
 	sigCh, stopSignals := notifyShutdownSignals()
 	defer stopSignals()
 	go func() {
 		sig := <-sigCh
-		child.stop()
+		if process := current.Load(); process != nil {
+			process.stop()
+		}
 		server.Close()
 		if s, ok := sig.(syscall.Signal); ok {
 			os.Exit(128 + int(s))
@@ -251,6 +260,10 @@ func run(argv []string) (int, error) {
 		return 0, err
 	}
 	openBrowser(opts, visualizerURL(opts, staticPort, &providerPort))
+
+	if opts.watch {
+		return watchForge(opts, &current, providerPort)
+	}
 
 	waitErr := child.wait()
 	if waitErr != nil {
@@ -373,9 +386,56 @@ func (p *forgeProcess) stop() {
 	_ = p.cmd.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-p.done:
+		return
 	case <-time.After(3 * time.Second):
-		_ = p.cmd.Process.Kill()
 	}
+	_ = p.cmd.Process.Kill()
+	// Wait briefly so the old process has released the provider port before
+	// a replacement is started on the same port.
+	select {
+	case <-p.done:
+	case <-time.After(time.Second):
+	}
+}
+
+// watchForge reloads Forge whenever the model changes. The provider port is
+// reused so the already-open visualizer reconnects to the new process.
+func watchForge(opts options, current *atomic.Pointer[forgeProcess], providerPort int) (int, error) {
+	changes, stop, err := watchFile(opts.model)
+	if err != nil {
+		return 0, err
+	}
+	defer stop()
+
+	logf(opts, "watching %s for changes", opts.model)
+	for range changes {
+		if err := validateForgeModel(opts); err != nil {
+			logf(opts, "model is invalid; not restarting: %v", err)
+			continue
+		}
+
+		logf(opts, "change detected; restarting Forge on port %d", providerPort)
+		if process := current.Load(); process != nil {
+			process.stop()
+		}
+
+		next, err := startForge(opts, providerPort)
+		if err != nil {
+			current.Store(nil)
+			logf(opts, "could not restart Forge: %v", err)
+			continue
+		}
+		current.Store(next)
+
+		if err := waitForProvider(next, opts.host, providerPort, opts.timeout); err != nil {
+			next.stop()
+			current.Store(nil)
+			logf(opts, "could not restart Forge: %v", err)
+			continue
+		}
+		logf(opts, "Forge restarted on port %d", providerPort)
+	}
+	return 0, nil
 }
 
 func waitForProvider(child *forgeProcess, host string, port int, timeout time.Duration) error {
@@ -657,6 +717,15 @@ func envPort(name string, fallback int) (int, error) {
 	return port, nil
 }
 
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func envPositiveInt(name string, fallback int) (int, error) {
 	value := os.Getenv(name)
 	if value == "" {
@@ -726,6 +795,7 @@ func helpText() string {
 			b.WriteString("      --serve-only           Serve the UI without starting Forge\n")
 		}
 		b.WriteString("      --model FILE           Model to run (alternative to a positional argument)\n")
+		b.WriteString("      --watch                Restart the provider when the model changes\n")
 	}
 	b.WriteString("      --static-port PORT     Port for the static file server (default: random)\n")
 	b.WriteString("      --host HOST            Address to bind (default: 127.0.0.1)\n")
@@ -743,6 +813,7 @@ func helpText() string {
 	b.WriteString("  STERLING_DIST              Same as --static-dir\n")
 	if allowModel {
 		b.WriteString("  STERLING_MODEL             Model to run when no positional argument is given\n")
+		b.WriteString("  STERLING_WATCH             Same as --watch\n")
 		b.WriteString("  STERLING_PROVIDER_PORT     Same as --provider-port\n")
 		b.WriteString("  STERLING_TIMEOUT           Same as --timeout\n")
 		if flavor == "alloy" {

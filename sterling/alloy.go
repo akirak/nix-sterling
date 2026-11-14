@@ -35,6 +35,8 @@ type alloyProvider struct {
 	host         string
 	port         int
 	timeout      time.Duration
+	server       *http.Server
+	closeOnce    sync.Once
 
 	mu       sync.Mutex
 	commands []alloyCommand
@@ -81,8 +83,65 @@ func runAlloy(opts options, staticPort int, staticDir string, alloyWS *atomic.In
 		return 0, err
 	}
 	openBrowser(opts, visualizerURL(opts, staticPort, &providerPort))
+
+	if opts.watch {
+		return watchAlloy(opts, provider, modelPath, alloyWS)
+	}
+
 	waitForSignal()
 	return 0, nil
+}
+
+// watchAlloy restarts the in-process Alloy provider whenever the model changes.
+// The new provider reuses the old provider's port so the open visualizer can
+// reconnect without changing its URL.
+func watchAlloy(opts options, provider *alloyProvider, modelPath string, alloyWS *atomic.Int64) (int, error) {
+	changes, stop, err := watchFile(modelPath)
+	if err != nil {
+		return 0, err
+	}
+	defer stop()
+	defer func() {
+		if provider != nil {
+			provider.close()
+		}
+	}()
+
+	sigCh, stopSignals := notifyShutdownSignals()
+	defer stopSignals()
+
+	providerPort := provider.port
+	logf(opts, "watching %s for changes", opts.model)
+	for {
+		select {
+		case <-sigCh:
+			return 0, nil
+		case <-changes:
+			if err := validateAlloyModel(opts, modelPath); err != nil {
+				logf(opts, "model is invalid; not restarting: %v", err)
+				continue
+			}
+
+			logf(opts, "change detected; restarting Alloy provider on port %d", providerPort)
+			if provider != nil {
+				provider.close()
+				provider = nil
+			}
+
+			restartOpts := opts
+			restartOpts.providerPort = providerPort
+			next, err := startAlloyProvider(restartOpts, modelPath)
+			if err != nil {
+				logf(opts, "could not restart Alloy provider: %v", err)
+				continue
+			}
+
+			provider = next
+			providerPort = provider.port
+			alloyWS.Store(int64(providerPort))
+			logf(opts, "Alloy provider restarted on port %d", providerPort)
+		}
+	}
 }
 
 func startAlloyProvider(opts options, model string) (*alloyProvider, error) {
@@ -125,6 +184,7 @@ func startAlloyProvider(opts options, model string) (*alloyProvider, error) {
 	p.commands = p.loadCommands()
 
 	server := &http.Server{Handler: http.HandlerFunc(p.handleHTTP)}
+	p.server = server
 	go func() { _ = server.Serve(listener) }()
 
 	// Start the default command in the background so the graph is ready as soon
@@ -139,22 +199,28 @@ func startAlloyProvider(opts options, model string) (*alloyProvider, error) {
 }
 
 func (p *alloyProvider) close() {
-	p.mu.Lock()
-	clients := make([]*wsConn, 0, len(p.clients))
-	for client := range p.clients {
-		clients = append(clients, client)
-	}
-	p.clients = make(map[*wsConn]struct{})
-	p.mu.Unlock()
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		clients := make([]*wsConn, 0, len(p.clients))
+		for client := range p.clients {
+			clients = append(clients, client)
+		}
+		p.clients = make(map[*wsConn]struct{})
+		p.mu.Unlock()
 
-	for _, client := range clients {
-		client.close()
-	}
+		for _, client := range clients {
+			client.close()
+		}
 
-	if p.cleanup != nil {
-		p.cleanup()
-		p.cleanup = nil
-	}
+		if p.server != nil {
+			_ = p.server.Close()
+		}
+
+		if p.cleanup != nil {
+			p.cleanup()
+			p.cleanup = nil
+		}
+	})
 }
 
 var alloyModulePattern = regexp.MustCompile(`(?m)^[ \t]*module[ \t]+([^ \t\r\n\[\]]+)`)

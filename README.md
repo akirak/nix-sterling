@@ -25,6 +25,14 @@ Additional arguments after `--` are forwarded directly to the underlying `racket
 nix run .#sterling-forge -- path/to/model.frg -- -O verbose 2
 ```
 
+To watch the model and restart the provider whenever it changes:
+
+```sh
+nix run .#sterling-forge -- --watch path/to/model.frg
+```
+
+The UI keeps the same URL because the provider is restarted on the same port. If the edited model does not validate, the launcher reports the error and keeps the current provider running.
+
 To serve only the Forge UI without starting a Forge process:
 
 ```sh
@@ -44,6 +52,12 @@ nix run .#sterling-alloy -- path/to/model.als
 ```
 
 `sterling-alloy` serves the Alloy-flavored UI and starts a local Sterling provider that runs the model's commands through the Alloy Analyzer. It prints the visualizer URL and opens it in the system browser, just like `sterling-forge`. Use `--alloy PATH` (or `STERLING_ALLOY`) to select a different Alloy executable.
+
+Pass `--watch` (or set `STERLING_WATCH=1`) to restart the provider on the same port whenever the model changes:
+
+```sh
+nix run .#sterling-alloy -- --watch path/to/model.als
+```
 
 Without a model, it serves the UI only and expects an external provider on Alloy's conventional port (4000):
 
