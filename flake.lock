@@ -3,11 +3,11 @@
     "copeanddrag": {
       "flake": false,
       "locked": {
-        "lastModified": 1791991327,
-        "narHash": "sha256-6nyhqoZmN5U1ia+zZxvA3zshbOC1mpMjuvW3X3a8v9U=",
+        "lastModified": 1795023754,
+        "narHash": "sha256-+Meh40kIiPft5IupxjTDed3g6G6C0la4O7V/XzdcxCA=",
         "owner": "sidprasad",
         "repo": "copeanddrag",
-        "rev": "1158ffc7d2faa10a045a4dd4794e93c8c5b49d6c",
+        "rev": "c825eed261900277525aa71e6cf885072061ef9b",
         "type": "github"
       },
       "original": {
